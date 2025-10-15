@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kaboom! Multiplayer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Socket.IO client library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #1a1a2e; }
+        .card {
+            width: 80px; height: 120px; border-radius: 8px; font-size: 1.5rem;
+            display: flex; justify-content: center; align-items: center;
+            font-weight: bold; position: relative; cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+            transition: transform 0.1s, box-shadow 0.1s;
+        }
+        .card:hover:not(.face-down):not(.drawn-card) { transform: translateY(-3px); }
+        .card.face-down { background-color: #8b0000; color: transparent; border: 3px solid #550000; }
+        .card.face-down::before { content: '?'; color: white; font-size: 2em; }
+        .card.revealed { background-color: #fff; color: #333; border: 1px solid #ccc; }
+        .card.joker { background-color: #d1f7d3; color: #008000; }
+        .card.selected { border: 4px solid #ffd700; box-shadow: 0 0 15px #ffd700; transform: scale(1.05); }
+        .hand-grid { grid-template-columns: repeat(2, 1fr); gap: 1rem; }
+        .player-status { border-left: 4px solid; padding-left: 1rem; }
+        .turn-indicator { border-color: #ffd700; }
+        .not-turn-indicator { border-color: #333; }
+        #drawn-card-display .card { width: 100px; height: 140px; margin-right: 1rem; }
+        .hidden-card { background-color: #333; color: #333; }
+    </style>
+</head>
+<body class="p-4 md:p-8 min-h-screen text-gray-100">
+    <div class="max-w-4xl mx-auto bg-gray-800 p-6 md:p-10 rounded-xl shadow-2xl">
+        <h1 class="text-4xl font-bold text-center mb-6 text-yellow-400">Kaboom! Multiplayer</h1>
+
+        <!-- Connection and Setup -->
+        <div id="setup-area" class="text-center mb-8">
+            <input type="text" id="player-name-input" placeholder="Enter Your Name" class="p-2 border border-gray-600 rounded-lg bg-gray-700 text-white focus:outline-none focus:ring-2 focus:ring-yellow-500 mr-3">
+            <button id="join-button" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition duration-200">
+                Join Game
+            </button>
+            <p id="connection-status" class="mt-4 text-sm text-red-400">Disconnected. Waiting to connect to server...</p>
+        </div>
+
+        <!-- Game Info & Turn -->
+        <div id="game-info" class="mb-6 hidden">
+            <div class="flex justify-between items-center mb-4">
+                <p class="text-lg font-semibold">Room ID: <span id="room-id" class="text-yellow-400">---</span></p>
+                <p class="text-xl font-bold p-2 rounded-lg bg-gray-700" id="turn-display">Waiting for turn...</p>
+            </div>
+            <div id="message-log" class="bg-gray-700 p-3 rounded-lg h-16 overflow-y-auto text-sm mb-4"></div>
+        </div>
+
+        <div id="game-area" class="hidden">
+            <!-- Drawn Card & Actions -->
+            <div class="flex flex-col md:flex-row justify-between items-center bg-gray-700 p-4 rounded-lg mb-6 shadow-inner">
+                <div class="flex items-center mb-4 md:mb-0">
+                    <p class="text-lg font-semibold mr-4">Deck:</p>
+                    <div class="card face-down mr-4"></div>
+                    <span class="text-xl font-bold" id="deck-count">54</span> cards left
+                </div>
+                
+                <div id="drawn-card-display" class="flex flex-col items-center">
+                    <p class="font-semibold mb-2">Drawn Card:</p>
+                    <div class="card drawn-card revealed empty-card text-gray-400">??</div>
+                </div>
+
+                <div id="action-buttons" class="flex flex-col space-y-2 mt-4 md:mt-0">
+                    <button id="draw-button" class="bg-green-600 hover:bg-green-700 py-2 px-4 rounded-lg font-bold" disabled>Draw Card</button>
+                    <button id="discard-button" class="bg-red-600 hover:bg-red-700 py-2 px-4 rounded-lg font-bold" disabled>Discard Drawn Card</button>
+                    <button id="replace-button" class="bg-yellow-600 hover:bg-yellow-700 py-2 px-4 rounded-lg font-bold" disabled>Replace Card</button>
+                </div>
+            </div>
+
+            <!-- Player Hands Display -->
+            <h2 class="text-2xl font-semibold mb-4 text-center">Your Hand</h2>
+            <div id="player-hand-container" class="grid hand-grid mx-auto w-fit">
+                <!-- Cards will be rendered here -->
+            </div>
+
+            <!-- Opponents Display -->
+            <h2 class="text-2xl font-semibold mt-8 mb-4 text-center">Opponents</h2>
+            <div id="opponents-container" class="space-y-6">
+                <!-- Opponent hands will be rendered here -->
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const socket = io();
+        let playerName = '';
+        let roomID = '';
+        let playerHand = [];
+        let selectedHandPosition = -1;
+        let isMyTurn = false;
+
+        // DOM elements
+        const setupArea = document.getElementById('setup-area');
+        const joinButton = document.getElementById('join-button');
+        const playerNameInput = document.getElementById('player-name-input');
+        const connectionStatus = document.getElementById('connection-status');
+        const gameInfo = document.getElementById('game-info');
+        const gameArea = document.getElementById('game-area');
+        const deckCountSpan = document.getElementById('deck-count');
+        const drawnCardDisplay = document.querySelector('#drawn-card-display .card');
+        const playerHandContainer = document.getElementById('player-hand-container');
+        const opponentsContainer = document.getElementById('opponents-container');
+        const turnDisplay = document.getElementById('turn-display');
+        const messageLog = document.getElementById('message-log');
+        const drawButton = document.getElementById('draw-button');
+        const discardButton = document.getElementById('discard-button');
+        const replaceButton = document.getElementById('replace-button');
+        const roomIdSpan = document.getElementById('room-id');
+
+        // --- Connection Handlers ---
+
+        socket.on('connect', () => {
+            connectionStatus.textContent = 'Connected. Enter your name and Join.';
+            connectionStatus.classList.remove('text-red-400');
+            connectionStatus.classList.add('text-green-400');
+            joinButton.disabled = false;
+        });
+
+        socket.on('disconnect', () => {
+            connectionStatus.textContent = 'Disconnected.';
+            connectionStatus.classList.remove('text-green-400');
+            connectionStatus.classList.add('text-red-400');
+            joinButton.disabled = true;
+            gameArea.classList.add('hidden');
+            setupArea.classList.remove('hidden');
+        });
+
+        socket.on('error', (message) => {
+            logMessage(`[Error] ${message}`, 'text-red-500');
+        });
+
+        socket.on('game_message', (message) => {
+            logMessage(`[Game] ${message}`, 'text-blue-300');
+        });
+        
+        // --- Game State Update ---
+
+        socket.on('game_state_update', (jsonState) => {
+            const state = JSON.parse(jsonState);
+            console.log("State Update:", state);
+            
+            // Show game area
+            setupArea.classList.add('hidden');
+            gameInfo.classList.remove('hidden');
+            gameArea.classList.remove('hidden');
+
+            roomIdSpan.textContent = state.room_id;
+            deckCountSpan.textContent = state.deck_count;
+
+            // Determine if it's my turn
+            const myPlayer = state.players.find(p => p.sid === socket.id);
+            isMyTurn = myPlayer && state.current_turn_sid === socket.id;
+            
+            if (isMyTurn) {
+                turnDisplay.textContent = "YOUR TURN";
+                turnDisplay.classList.add('bg-yellow-400', 'text-gray-900');
+                turnDisplay.classList.remove('bg-gray-700', 'text-gray-100');
+            } else {
+                const currentTurnPlayer = state.players.find(p => p.sid === state.current_turn_sid);
+                turnDisplay.textContent = `Turn: ${currentTurnPlayer ? currentTurnPlayer.name : 'Waiting...'}`;
+                turnDisplay.classList.remove('bg-yellow-400', 'text-gray-900');
+                turnDisplay.classList.add('bg-gray-700', 'text-gray-100');
+            }
+
+            // Update Drawn Card Display
+            renderDrawnCard(state.drawn_card);
+
+            // Render Hands
+            renderHands(state.players);
+
+            // Update buttons based on turn and drawn card
+            updateActionButtons(isMyTurn, state.drawn_card);
+        });
+
+        // --- Rendering Functions ---
+
+        function renderDrawnCard(cardData) {
+            drawnCardDisplay.className = 'card drawn-card';
+            drawnCardDisplay.classList.add('revealed');
+            
+            if (cardData) {
+                drawnCardDisplay.textContent = cardData.display_name;
+                drawnCardDisplay.classList.remove('empty-card', 'text-gray-400');
+                if (cardData.rank === 'Joker') {
+                    drawnCardDisplay.classList.add('joker');
+                }
+            } else {
+                drawnCardDisplay.textContent = '??';
+                drawnCardDisplay.classList.add('empty-card', 'text-gray-400');
+            }
+        }
+
+        function renderHands(players) {
+            playerHandContainer.innerHTML = '';
+            opponentsContainer.innerHTML = '';
+            
+            players.forEach(p => {
+                const isLocalPlayer = p.sid === socket.id;
+                
+                // Reset selection state for local player on new render
+                if (isLocalPlayer) {
+                    playerHand = p.hand;
+                    selectedHandPosition = -1;
+                }
+
+                const playerDiv = document.createElement('div');
+                playerDiv.className = isLocalPlayer ? 'hand-grid mx-auto w-fit' : 'p-4 bg-gray-700 rounded-lg player-status';
+                playerDiv.classList.add(p.is_current_player ? 'turn-indicator' : 'not-turn-indicator');
+                
+                if (!isLocalPlayer) {
+                    // Render Opponent Hand
+                    playerDiv.innerHTML = `<h3 class="text-xl font-semibold mb-3">${p.name}'s Hand (${p.hand.length} cards)</h3>`;
+                    
+                    const opponentHandGrid = document.createElement('div');
+                    opponentHandGrid.className = 'grid hand-grid';
+                    p.hand.forEach((card, index) => {
+                        const cardElement = document.createElement('div');
+                        cardElement.className = 'card ' + (card.is_face_up ? 'revealed' : 'face-down');
+                        cardElement.textContent = card.is_face_up ? card.display_name : '';
+                        if (card.rank === 'Joker') cardElement.classList.add('joker');
+                        opponentHandGrid.appendChild(cardElement);
+                    });
+                    playerDiv.appendChild(opponentHandGrid);
+                    opponentsContainer.appendChild(playerDiv);
+
+                } else {
+                    // Render Local Player Hand
+                    p.hand.forEach((card, index) => {
+                        const cardElement = document.createElement('div');
+                        cardElement.className = 'card ' + (card.is_face_up ? 'revealed' : 'face-down');
+                        
+                        // Local player sees their own cards regardless of face-up state
+                        cardElement.textContent = card.display_name; 
+                        
+                        cardElement.dataset.position = index;
+                        if (card.rank === 'Joker') cardElement.classList.add('joker');
+                        
+                        cardElement.addEventListener('click', () => handleHandCardClick(index));
+                        playerHandContainer.appendChild(cardElement);
+                    });
+                }
+            });
+        }
+
+        function logMessage(message, colorClass = 'text-white') {
+            const p = document.createElement('p');
+            p.className = `${colorClass} text-xs leading-4`;
+            p.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            messageLog.prepend(p);
+            // Keep log size manageable
+            if (messageLog.children.length > 20) {
+                messageLog.removeChild(messageLog.lastChild);
+            }
+        }
+
+        function updateActionButtons(isTurn, drawnCard) {
+            drawButton.disabled = !isTurn || drawnCard !== null;
+            discardButton.disabled = !isTurn || drawnCard === null;
+            replaceButton.disabled = !isTurn || drawnCard === null || selectedHandPosition === -1;
+        }
+
+        // --- Interaction Handlers ---
+
+        function handleHandCardClick(position) {
+            if (!isMyTurn || document.getElementById('drawn-card-display').querySelector('.empty-card')) {
+                logMessage("You must draw a card first or it is not your turn.", 'text-red-500');
+                return;
+            }
+
+            // Deselect previous card
+            if (selectedHandPosition !== -1) {
+                const prevEl = playerHandContainer.querySelector(`[data-position="${selectedHandPosition}"]`);
+                if (prevEl) prevEl.classList.remove('selected');
+            }
+
+            // Select new card
+            selectedHandPosition = position;
+            const currentEl = playerHandContainer.querySelector(`[data-position="${selectedHandPosition}"]`);
+            if (currentEl) currentEl.classList.add('selected');
+            
+            logMessage(`Selected card at position ${position} for replacement.`);
+            updateActionButtons(isMyTurn, true);
+        }
+
+        // --- Button Events ---
+
+        joinButton.addEventListener('click', () => {
+            playerName = playerNameInput.value.trim();
+            if (playerName) {
+                socket.emit('join_game', { name: playerName });
+                joinButton.disabled = true;
+                playerNameInput.disabled = true;
+                logMessage(`Attempting to join game as ${playerName}...`, 'text-green-400');
+            } else {
+                logMessage('Please enter a valid name.', 'text-red-500');
+            }
+        });
+
+        drawButton.addEventListener('click', () => {
+            socket.emit('draw_card');
+            logMessage('Drawing card...', 'text-yellow-300');
+        });
+
+        discardButton.addEventListener('click', () => {
+            if (confirm("Are you sure you want to discard the drawn card?")) {
+                socket.emit('discard_drawn_card');
+                logMessage('Discarding drawn card.', 'text-yellow-300');
+            }
+        });
+
+        replaceButton.addEventListener('click', () => {
+            if (selectedHandPosition !== -1) {
+                if (confirm(`Replace card at position ${selectedHandPosition}?`)) {
+                    socket.emit('replace_card', { position: selectedHandPosition });
+                    logMessage(`Replacing card at position ${selectedHandPosition}.`, 'text-yellow-300');
+                    selectedHandPosition = -1; // Clear selection after sending
+                }
+            } else {
+                logMessage('Please select a card in your hand to replace.', 'text-red-500');
+            }
+        });
+        
+    </script>
+</body>
+</html>
