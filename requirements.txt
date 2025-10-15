@@ -1,11 +1,4 @@
-Core Python web framework
 Flask==3.0.3
-
-Real-time communication library
 Flask-SocketIO==5.3.6
-
-Required for asynchronous networking on platforms like Render
 eventlet==0.36.1
-
-Serialization library for sending complex objects over the network
 simplejson==3.19.2
